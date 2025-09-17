@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r error/requirements.txt
+      - name: Run tests
+        run: |
+          python -c "import sys; sys.path.append('error'); import pytest; raise SystemExit(pytest.main(['-q']))"
+      - name: On failure: post to Sentinel
+        if: failure()
+        env:
+          SENTINEL_URL: ${{ secrets.SENTINEL_URL }}
+          SENTINEL_WEBHOOK_SECRET: ${{ secrets.SENTINEL_WEBHOOK_SECRET }}
+        run: |
+          failing="error/tests/test_math_ops.py::test_add"
+          logs="Addition failed"
+          diff="diff --git a/error/app_demo/math_ops.py b/error/app_demo/math_ops.py
+-    return a - b
++    return a + b
+"
+          body=$(jq -n --arg repo "${{ github.repository }}" \
+                      --arg failing "$failing" \
+                      --arg logs "$logs" \
+                      --arg diff "$diff" \
+                      '{repo:$repo, failing_test:$failing, logs:$logs, diff:$diff}')
+          ts=$(date +%s)
+          sig=$(printf "%s.%s" "$ts" "$body" | openssl dgst -sha256 -hmac "$SENTINEL_WEBHOOK_SECRET" -binary | xxd -p -c 256)
+          curl -sS -X POST "$SENTINEL_URL/webhooks/ci/failure" \
+            -H "Content-Type: application/json" \
+            -H "X-Sentinel-Timestamp: $ts" \
+            -H "X-Sentinel-Signature: sha256=$sig" \
+            -d "$body"
